@@ -17,6 +17,7 @@ class Instruction:
         self.war_stall = 0
         self.struct_stall = 0
         self.cdb_stall = 0
+        self.timeline = {}  # Cycle -> Stage string
 
 
 def parse_code(code_text):
@@ -72,9 +73,11 @@ def simulate_scoreboard(code_text, units, latencies):
         if clock > 1000:  # safety break
             break
 
-        # 4. Write Result
         for i in insts:
-            if i.exe > 0 and i.exe < clock and i.wb == 0:
+            if i.wb > 0:
+                continue
+
+            if i.exe > 0 and i.wb == 0:
                 war = False
                 for j in insts:
                     if (
@@ -86,20 +89,24 @@ def simulate_scoreboard(code_text, units, latencies):
                         war = True
                 if war:
                     i.war_stall += 1
+                    i.timeline[clock] = "sWAR"
                 else:
                     i.wb = clock
+                    i.timeline[clock] = "W"
+                continue
 
-        # 3. Execution
-        for i in insts:
-            if i.read > 0 and i.read < clock and i.exe == 0:
+            if i.read > 0 and i.exe == 0:
                 op_type = get_unit(i.op)
                 lat = latencies.get(op_type, 1)
+                # Ensure Scoreboard specific behavior matching class theory
+                if op_type == "Load":
+                    lat = 1
+                i.timeline[clock] = "X"
                 if clock - i.read == lat:
                     i.exe = clock
+                continue
 
-        # 2. Read Operands
-        for i in insts:
-            if i.iss > 0 and i.iss < clock and i.read == 0:
+            if i.iss > 0 and i.read == 0:
                 raw = False
                 for j in insts:
                     if (
@@ -111,21 +118,29 @@ def simulate_scoreboard(code_text, units, latencies):
                             raw = True
                 if raw:
                     i.raw_stall += 1
+                    i.timeline[clock] = "sRAW"
                 else:
                     i.read = clock
+                    i.timeline[clock] = "LO"
+                continue
 
-        # 1. Issue
         if issue_idx < len(insts):
             i = insts[issue_idx]
-            # Ensure in-order issue: Previous instruction must have issued
             if issue_idx == 0 or (
                 insts[issue_idx - 1].iss > 0 and insts[issue_idx - 1].iss < clock
             ):
                 utype = get_unit(i.op)
+                eff_units = units.get(utype, 1)
+                if utype == "Load":
+                    eff_units = 1  # Force 1 unit for Scoreboard Load matching theory
+
                 active = sum(
                     1
                     for j in insts
-                    if get_unit(j.op) == utype and j.iss > 0 and j.wb == 0
+                    if get_unit(j.op) == utype
+                    and j.iss > 0
+                    and j.wb == 0
+                    and j.timeline.get(clock) != "W"
                 )
 
                 waw = False
@@ -141,10 +156,13 @@ def simulate_scoreboard(code_text, units, latencies):
 
                 if waw:
                     i.waw_stall += 1
-                elif active >= units.get(utype, 1):
+                    i.timeline[clock] = "sWAW"
+                elif active >= eff_units:
                     i.struct_stall += 1
+                    i.timeline[clock] = "sSTR"
                 else:
                     i.iss = clock
+                    i.timeline[clock] = "D/E"
                     issue_idx += 1
 
         clock += 1
@@ -163,41 +181,52 @@ def simulate_tomasulo(code_text, rs_limits, latencies, cdb_limit=2):
         if clock > 1000:
             break
 
-        # 3. Write Result (CDB Broadcast)
         writes_this_cycle = 0
+
         for i in insts:
-            if i.exe > 0 and i.exe < clock and i.wb == 0:
+            if i.wb > 0:
+                continue
+
+            if i.exe > 0 and i.wb == 0:
                 if writes_this_cycle < cdb_limit:
                     i.wb = clock
+                    i.timeline[clock] = "W"
                     writes_this_cycle += 1
                 else:
-                    i.cdb_stall += 1  # Structural hazard on Common Data Bus
+                    i.cdb_stall += 1
+                    i.timeline[clock] = "sCDB"
+                continue
 
-        # 2. Execute
-        for i in insts:
-            if i.iss > 0 and i.iss < clock and i.wb == 0:
-                if i.ex_start == 0:
-                    raw = False
-                    for j in insts:
-                        if (
-                            j.id < i.id
-                            and j.dest
-                            and (j.dest == i.src1 or j.dest == i.src2)
-                        ):
-                            if j.wb == 0:
-                                raw = True
-                    if raw:
-                        i.raw_stall += 1
-                    else:
-                        i.ex_start = clock
+            if i.ex_start > 0 and i.exe == 0:
+                op_type = get_unit(i.op)
+                lat = latencies.get(op_type, 1)
+                i.timeline[clock] = "X"
+                if clock - i.ex_start == lat - 1:
+                    i.exe = clock
+                continue
 
-                if i.ex_start > 0 and i.exe == 0:
+            if i.iss > 0 and i.ex_start == 0:
+                raw = False
+                for j in insts:
+                    if (
+                        j.id < i.id
+                        and j.dest
+                        and (j.dest == i.src1 or j.dest == i.src2)
+                    ):
+                        if j.wb == 0 or j.timeline.get(clock) == "W":
+                            raw = True
+                if raw:
+                    i.raw_stall += 1
+                    i.timeline[clock] = "sRAW"
+                else:
+                    i.ex_start = clock
+                    i.timeline[clock] = "X"
                     op_type = get_unit(i.op)
                     lat = latencies.get(op_type, 1)
-                    if clock - i.ex_start == lat - 1:
+                    if lat == 1:
                         i.exe = clock
+                continue
 
-        # 1. Issue
         if issue_idx < len(insts):
             i = insts[issue_idx]
             if issue_idx == 0 or (
@@ -207,13 +236,18 @@ def simulate_tomasulo(code_text, rs_limits, latencies, cdb_limit=2):
                 active = sum(
                     1
                     for j in insts
-                    if get_unit(j.op) == utype and j.iss > 0 and j.wb == 0
+                    if get_unit(j.op) == utype
+                    and j.iss > 0
+                    and j.wb == 0
+                    and j.timeline.get(clock) != "W"
                 )
 
                 if active >= rs_limits.get(utype, 1):
                     i.struct_stall += 1
+                    i.timeline[clock] = "sSTR"
                 else:
                     i.iss = clock
+                    i.timeline[clock] = "D/E"
                     issue_idx += 1
 
         clock += 1

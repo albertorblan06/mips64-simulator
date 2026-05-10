@@ -222,33 +222,25 @@ mul.d $f16, $f6, $f12"""
         for i in insts:
             row_data = [f"{i.op} {i.dest or ''}"]
             for c in range(1, max_cycle + 1):
-                cell = ""
-                if algo == "scoreboard":
-                    if c == i.iss:
-                        cell = "D/E"
-                    elif i.iss < c < i.read:
-                        cell = "-"
-                    elif c == i.read:
-                        cell = "LO"
-                    elif i.read < c <= i.exe:
-                        cell = "X"
-                    elif i.exe < c < i.wb:
-                        cell = "-"
-                    elif c == i.wb:
-                        cell = "W"
-                else:  # tomasulo
-                    if c == i.iss:
-                        cell = "D/E"
-                    elif i.iss < c < i.ex_start:
-                        cell = "-"
-                    elif i.ex_start <= c <= i.exe:
-                        cell = "X"
-                    elif i.exe < c < i.wb:
-                        cell = "-"
-                    elif c == i.wb:
-                        cell = "W"
-                row_data.append(cell)
-            self.tree.insert("", tk.END, values=row_data)
+                cell_val = i.timeline.get(c, "")
+                if cell_val == "D/E":
+                    row_data.append("D/E")
+                elif cell_val == "LO":
+                    row_data.append("LO")
+                elif cell_val == "X":
+                    row_data.append("X")
+                elif cell_val == "W":
+                    row_data.append("W")
+                elif cell_val.startswith("s"):
+                    row_data.append(cell_val)  # Will show sRAW, sSTR, etc.
+                else:
+                    row_data.append("")
+
+            # Insert into treeview. We can add tags based on states for colors!
+            item = self.tree.insert("", tk.END, values=row_data)
+
+        # Apply basic Treeview colors if possible, but Tkinter Treeview cell background coloring is tricky per column.
+        # Alternatively, the string text itself shows the explicit state!
 
 
 if __name__ == "__main__":
