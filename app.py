@@ -73,6 +73,34 @@ mul.d $f16, $f6, $f12"""
             btn_frame, text="Run Tomasulo", command=self.run_tomasulo, bg="lightgreen"
         ).pack(side=tk.LEFT, padx=5)
 
+        # Stats Panel
+        self.stats_frame = tk.LabelFrame(
+            config_frame, text="Execution Statistics", fg="blue"
+        )
+        self.stats_frame.grid(
+            row=row + 2, column=0, columnspan=3, sticky="ew", pady=10, padx=5
+        )
+
+        self.cycles_var = tk.StringVar(value="Total Cycles: 0")
+        self.insts_var = tk.StringVar(value="Instructions: 0")
+        self.cpi_var = tk.StringVar(value="CPI: 0.000")
+        self.raw_stalls_var = tk.StringVar(value="RAW Stalls: 0")
+        self.other_stalls_var = tk.StringVar(value="Struct/WAR/CDB Stalls: 0")
+
+        tk.Label(
+            self.stats_frame, textvariable=self.cycles_var, font=("Arial", 11, "bold")
+        ).pack(anchor="w", padx=5, pady=2)
+        tk.Label(self.stats_frame, textvariable=self.insts_var).pack(anchor="w", padx=5)
+        tk.Label(
+            self.stats_frame, textvariable=self.cpi_var, font=("Arial", 11, "bold")
+        ).pack(anchor="w", padx=5, pady=2)
+        tk.Label(self.stats_frame, textvariable=self.raw_stalls_var, fg="red").pack(
+            anchor="w", padx=5
+        )
+        tk.Label(self.stats_frame, textvariable=self.other_stalls_var, fg="red").pack(
+            anchor="w", padx=5
+        )
+
         # Bottom Frame: Timeline Table
         bottom_frame = tk.LabelFrame(root, text="Cycle Timeline")
         bottom_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -134,6 +162,38 @@ mul.d $f16, $f6, $f12"""
         max_cycle = max(i.wb for i in insts) if any(i.wb > 0 for i in insts) else 0
         if max_cycle == 0:
             return
+
+        # Calculate Statistics
+        num_insts = len(insts)
+        cpi = max_cycle / num_insts if num_insts > 0 else 0
+        raw_stalls = 0
+        other_stalls = 0
+
+        for i in insts:
+            if algo == "scoreboard":
+                if i.read > 0 and i.iss > 0:
+                    stall = i.read - i.iss - 1
+                    if stall > 0:
+                        raw_stalls += stall
+                if i.wb > 0 and i.exe > 0:
+                    stall = i.wb - i.exe - 1
+                    if stall > 0:
+                        other_stalls += stall
+            else:  # tomasulo
+                if i.ex_start > 0 and i.iss > 0:
+                    stall = i.ex_start - i.iss - 1
+                    if stall > 0:
+                        raw_stalls += stall
+                if i.wb > 0 and i.exe > 0:
+                    stall = i.wb - i.exe - 1
+                    if stall > 0:
+                        other_stalls += stall
+
+        self.cycles_var.set(f"Total Cycles: {max_cycle}")
+        self.insts_var.set(f"Instructions Executed: {num_insts}")
+        self.cpi_var.set(f"CPI: {cpi:.3f}")
+        self.raw_stalls_var.set(f"RAW Stalls (Wait for Operands): {raw_stalls}")
+        self.other_stalls_var.set(f"Struct/WAR/CDB Stalls: {other_stalls}")
 
         cols = ["Instruction"] + [str(c) for c in range(1, max_cycle + 1)]
         self.tree["columns"] = cols
