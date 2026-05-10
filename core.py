@@ -11,6 +11,12 @@ class Instruction:
         self.exe = 0
         self.wb = 0
         self.ex_start = 0
+        # Stalls tracking
+        self.raw_stall = 0
+        self.waw_stall = 0
+        self.war_stall = 0
+        self.struct_stall = 0
+        self.cdb_stall = 0
 
 
 def parse_code(code_text):
@@ -78,7 +84,9 @@ def simulate_scoreboard(code_text, units, latencies):
                         and (j.src1 == i.dest or j.src2 == i.dest)
                     ):
                         war = True
-                if not war:
+                if war:
+                    i.war_stall += 1
+                else:
                     i.wb = clock
 
         # 3. Execution
@@ -101,38 +109,119 @@ def simulate_scoreboard(code_text, units, latencies):
                     ):
                         if j.wb == 0:
                             raw = True
-                if not raw:
+                if raw:
+                    i.raw_stall += 1
+                else:
                     i.read = clock
 
         # 1. Issue
         if issue_idx < len(insts):
             i = insts[issue_idx]
-            utype = get_unit(i.op)
-            active = sum(
-                1 for j in insts if get_unit(j.op) == utype and j.iss > 0 and j.wb == 0
-            )
+            # Ensure in-order issue: Previous instruction must have issued
+            if issue_idx == 0 or (
+                insts[issue_idx - 1].iss > 0 and insts[issue_idx - 1].iss < clock
+            ):
+                utype = get_unit(i.op)
+                active = sum(
+                    1
+                    for j in insts
+                    if get_unit(j.op) == utype and j.iss > 0 and j.wb == 0
+                )
 
-            waw = False
-            for j in insts:
-                if (
-                    j.id < i.id
-                    and j.iss > 0
-                    and j.wb == 0
-                    and j.dest
-                    and j.dest == i.dest
-                ):
-                    waw = True
+                waw = False
+                for j in insts:
+                    if (
+                        j.id < i.id
+                        and j.iss > 0
+                        and j.wb == 0
+                        and j.dest
+                        and j.dest == i.dest
+                    ):
+                        waw = True
 
-            if active < units.get(utype, 1) and not waw:
-                i.iss = clock
-                issue_idx += 1
+                if waw:
+                    i.waw_stall += 1
+                elif active >= units.get(utype, 1):
+                    i.struct_stall += 1
+                else:
+                    i.iss = clock
+                    issue_idx += 1
 
         clock += 1
 
     return insts
 
 
-def simulate_tomasulo(code_text, rs_limits, latencies):
+def simulate_tomasulo(code_text, rs_limits, latencies, cdb_limit=2):
+    insts = parse_code(code_text)
+    clock = 1
+    issue_idx = 0
+
+    while True:
+        if len(insts) > 0 and all(i.wb > 0 for i in insts):
+            break
+        if clock > 1000:
+            break
+
+        # 3. Write Result (CDB Broadcast)
+        writes_this_cycle = 0
+        for i in insts:
+            if i.exe > 0 and i.exe < clock and i.wb == 0:
+                if writes_this_cycle < cdb_limit:
+                    i.wb = clock
+                    writes_this_cycle += 1
+                else:
+                    i.cdb_stall += 1  # Structural hazard on Common Data Bus
+
+        # 2. Execute
+        for i in insts:
+            if i.iss > 0 and i.iss < clock and i.wb == 0:
+                if i.ex_start == 0:
+                    raw = False
+                    for j in insts:
+                        if (
+                            j.id < i.id
+                            and j.dest
+                            and (j.dest == i.src1 or j.dest == i.src2)
+                        ):
+                            if j.wb == 0:
+                                raw = True
+                    if raw:
+                        i.raw_stall += 1
+                    else:
+                        i.ex_start = clock
+
+                if i.ex_start > 0 and i.exe == 0:
+                    op_type = get_unit(i.op)
+                    lat = latencies.get(op_type, 1)
+                    if clock - i.ex_start == lat - 1:
+                        i.exe = clock
+
+        # 1. Issue
+        if issue_idx < len(insts):
+            i = insts[issue_idx]
+            if issue_idx == 0 or (
+                insts[issue_idx - 1].iss > 0 and insts[issue_idx - 1].iss < clock
+            ):
+                utype = get_unit(i.op)
+                active = sum(
+                    1
+                    for j in insts
+                    if get_unit(j.op) == utype and j.iss > 0 and j.wb == 0
+                )
+
+                if active >= rs_limits.get(utype, 1):
+                    i.struct_stall += 1
+                else:
+                    i.iss = clock
+                    issue_idx += 1
+
+        clock += 1
+
+    return insts
+
+
+def simulate_tomasulo(code_text, rs_limits, latencies, cdb_limit=2):
     insts = parse_code(code_text)
     clock = 1
     issue_idx = 0
@@ -144,9 +233,14 @@ def simulate_tomasulo(code_text, rs_limits, latencies):
             break
 
         # 3. Write Result
+        writes_this_cycle = 0
         for i in insts:
             if i.exe > 0 and i.exe < clock and i.wb == 0:
-                i.wb = clock
+                if writes_this_cycle < cdb_limit:
+                    i.wb = clock
+                    writes_this_cycle += 1
+                else:
+                    i.cdb_stall += 1
 
         # 2. Execute
         for i in insts:
