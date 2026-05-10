@@ -194,53 +194,78 @@ mul.d $f16, $f6, $f12"""
         num_insts = len(insts)
         cpi = max_cycle / num_insts if num_insts > 0 else 0
 
-        raw_stalls = sum(i.raw_stall for i in insts)
-        waw_stalls = sum(i.waw_stall for i in insts)
-        war_stalls = sum(i.war_stall for i in insts)
-        struct_stalls = sum(i.struct_stall for i in insts)
-        cdb_stalls = sum(i.cdb_stall for i in insts)
+        raw_stalls = 0
+        war_stalls = 0
+
+        for i in insts:
+            if algo == "scoreboard":
+                if i.read > 0 and i.iss > 0:
+                    stall = i.read - i.iss - 1
+                    if stall > 0:
+                        raw_stalls += stall
+                if i.wb > 0 and i.exe > 0:
+                    stall = i.wb - i.exe - 1
+                    if stall > 0:
+                        war_stalls += stall
+            else:  # tomasulo
+                if i.ex_start > 0 and i.iss > 0:
+                    stall = i.ex_start - i.iss - 1
+                    if stall > 0:
+                        raw_stalls += stall
+                if i.wb > 0 and i.exe > 0:
+                    stall = i.wb - i.exe - 1
+                    if stall > 0:
+                        war_stalls += stall
 
         self.cycles_var.set(f"Total Cycles: {max_cycle}")
         self.insts_var.set(f"Instructions Executed: {num_insts}")
         self.cpi_var.set(f"CPI: {cpi:.3f}")
         self.raw_stalls_var.set(f"RAW Stalls (Wait for Operands): {raw_stalls}")
-        self.waw_stalls_var.set(f"WAW Stalls: {waw_stalls}")
-        self.war_stalls_var.set(f"WAR Stalls: {war_stalls}")
-        self.struct_stalls_var.set(f"Structural Stalls (No FU/RS): {struct_stalls}")
-        self.cdb_stalls_var.set(f"CDB Stalls: {cdb_stalls}")
+        self.war_stalls_var.set(f"WAR/Struct/CDB Stalls: {war_stalls}")
+        self.waw_stalls_var.set("WAW/Structural stalls are hidden in Issue stage.")
+        self.struct_stalls_var.set("")
+        self.cdb_stalls_var.set("")
 
         cols = ["Instruction"] + [str(c) for c in range(1, max_cycle + 1)]
         self.tree["columns"] = cols
-        self.tree.column("#0", width=0, stretch=tk.NO)  # Hide default first col
+        self.tree.column("#0", width=0, stretch=tk.NO)
         self.tree.heading("#0", text="")
 
         for c in cols:
-            w = 120 if c == "Instruction" else 30
+            w = 120 if c == "Instruction" else 40
             self.tree.column(c, width=w, anchor=tk.CENTER)
             self.tree.heading(c, text=c)
 
         for i in insts:
             row_data = [f"{i.op} {i.dest or ''}"]
             for c in range(1, max_cycle + 1):
-                cell_val = i.timeline.get(c, "")
-                if cell_val == "D/E":
-                    row_data.append("D/E")
-                elif cell_val == "LO":
-                    row_data.append("LO")
-                elif cell_val == "X":
-                    row_data.append("X")
-                elif cell_val == "W":
-                    row_data.append("W")
-                elif cell_val.startswith("s"):
-                    row_data.append(cell_val)  # Will show sRAW, sSTR, etc.
-                else:
-                    row_data.append("")
-
-            # Insert into treeview. We can add tags based on states for colors!
-            item = self.tree.insert("", tk.END, values=row_data)
-
-        # Apply basic Treeview colors if possible, but Tkinter Treeview cell background coloring is tricky per column.
-        # Alternatively, the string text itself shows the explicit state!
+                cell = ""
+                if algo == "scoreboard":
+                    if c == i.iss:
+                        cell = "D/E"
+                    elif i.iss < c < i.read:
+                        cell = "sRAW"
+                    elif c == i.read:
+                        cell = "LO"
+                    elif i.read < c <= i.exe:
+                        cell = "X"
+                    elif i.exe < c < i.wb:
+                        cell = "sWAR"
+                    elif c == i.wb:
+                        cell = "W"
+                else:  # tomasulo
+                    if c == i.iss:
+                        cell = "D/E"
+                    elif i.iss < c < i.ex_start:
+                        cell = "sRAW"
+                    elif i.ex_start <= c <= i.exe:
+                        cell = "X"
+                    elif i.exe < c < i.wb:
+                        cell = "sCDB"
+                    elif c == i.wb:
+                        cell = "W"
+                row_data.append(cell)
+            self.tree.insert("", tk.END, values=row_data)
 
 
 if __name__ == "__main__":
